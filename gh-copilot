@@ -20,7 +20,7 @@ if [ ! -f "$LOGFILE" ]; then
   exit 1
 fi
 
-TOKEN="$GITHUB_TOKEN"
+TOKEN="$(grep github.com ~/.netrc  | cut -d ' ' -f 6)"
 
 if [ -z "$TOKEN" ]; then
   echo "ERROR: GITHUB_TOKEN is not set"
