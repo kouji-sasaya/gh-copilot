@@ -1,29 +1,199 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
-MYNAKE=$(basename "$0")
-GH_COMMAND=$(basename "${0}" | tr '-' ' ')
-TOP=$(dirname "${0}")
-COMMAND="${1}"
+usage() {
+  echo "Usage:"
+  echo " gh copilot <logfile>"
+}
 
-if [ $# -eq 0 ];then
-  echo "Usage: ${GH_COMMAND} [command]"
-  echo " ${GH_COMMAND} setup     # Build the Docker image"
-  echo " ${GH_COMMAND} shell     # Start a Rust shell in the Docker container"
-  exit
+if [ $# -ne 1 ]; then
+  usage
+  exit 1
 fi
 
-if [ "${COMMAND}" = "setup" ]; then
-  docker compose -f "${TOP}/docker-compose.yml" build
-  exit 0
+LOGFILE="$1"
+BUILD_COMMAND="docker compose build"
+MODEL="gpt-4o-mini"
+
+if [ ! -f "$LOGFILE" ]; then
+  echo "ERROR: log file not found: $LOGFILE"
+  exit 1
 fi
 
-if [ "${COMMAND}" = "shell" ]; then
-  shift
-  docker compose -f "${TOP}/docker-compose.yml" run \
-    --user $(id -u):$(id -g) \
-    --volume .:/workdir \
-    -q --name "${MYNAKE}" \
-    --rm "${MYNAKE}" "$@"
-  exit 0
+TOKEN="$GITHUB_TOKEN"
+
+if [ -z "$TOKEN" ]; then
+  echo "ERROR: GITHUB_TOKEN is not set"
+  exit 1
 fi
+
+CHUNK_SIZE=8000   # 文字数で分割（安全なサイズ）
+
+# ログ全体を読み込み
+LOG=$(cat "$LOGFILE")
+
+# 元ログの重要行を抽出し、ERROR優先で最大10行に絞る
+CANDIDATE_EVIDENCE=$(printf "%s\n" "$LOG" | grep -E "ERROR:|WARNING:|Summary:|Task \(|do_[a-z_]+|oe_runmake failed|make: \*\*\*|:[0-9]+:[0-9]+: (error|warning):|:[0-9]+: (error|warning):" || true)
+if [ -z "$CANDIDATE_EVIDENCE" ]; then
+  CANDIDATE_EVIDENCE=$(printf "%s\n" "$LOG" | head -n 40)
+fi
+
+EVIDENCE=$(printf "%s\n" "$CANDIDATE_EVIDENCE" | awk '
+BEGIN { IGNORECASE=1 }
+{
+  severity=4
+  if ($0 ~ /:[0-9]+:[0-9]+: error:|:[0-9]+: error:|(^|[[:space:]])ERROR:/) {
+    severity=1
+  } else if ($0 ~ /oe_runmake failed|make: \*\*\*|failed with exit code|Task \(/) {
+    severity=2
+  } else if ($0 ~ /WARNING:|warning:/) {
+    severity=3
+  }
+  print severity "|" NR "|" $0
+}' | sort -t'|' -k1,1n -k2,2n | cut -d'|' -f3- | head -n 10)
+
+if [ -z "$EVIDENCE" ]; then
+  EVIDENCE=$(printf "%s\n" "$LOG" | head -n 10)
+fi
+
+# ファイル名/行番号のみの一覧（例: src/main.c:42:13）
+LINE_INDEX=$(printf "%s\n" "$LOG" \
+  | grep -Eo '([[:alnum:]_./-]+\.[[:alnum:]_+-]+):[0-9]+(:[0-9]+)?' \
+  | awk '!seen[$0]++' \
+  | head -n 20 || true)
+
+if [ -z "$LINE_INDEX" ]; then
+  LINE_INDEX="(抽出なし)"
+fi
+
+# 文字数を取得
+TOTAL_LEN=${#LOG}
+
+# チャンク数を計算
+CHUNKS=$(( (TOTAL_LEN + CHUNK_SIZE - 1) / CHUNK_SIZE ))
+
+echo "📄 ログサイズ: $TOTAL_LEN 文字"
+echo "📥 入力ログ: $LOGFILE"
+echo "🔧 ビルドコマンド: $BUILD_COMMAND"
+echo "🤖 モデル: $MODEL"
+echo "🔍 エラーログを解析中..."
+
+RESULT=""
+
+for ((i=0; i<CHUNKS; i++)); do
+  START=$(( i * CHUNK_SIZE ))
+  PART=${LOG:START:CHUNK_SIZE}
+
+  USER_PROMPT=$(cat <<EOF
+以下のログを解析し、絵文字付きで次の形式で出力してください。各項目は簡潔に2-4行。必要なら箇条書き。
+
+🚨 主要エラー
+🧩 原因
+🛠 修正案
+✅ 再発防止策
+🔎 ログ根拠（最大10行、ERROR優先）
+📍 ファイル/行番号
+
+ビルドコマンド: $BUILD_COMMAND
+
+$PART
+EOF
+)
+
+  PAYLOAD=$(jq -n \
+    --arg model "$MODEL" \
+    --arg system "あなたはビルドエラー解析の専門家です。出力は必ず日本語で、実務者が一目で判断できるように整理してください。" \
+    --arg user "$USER_PROMPT" \
+    '{
+      model: $model,
+      messages: [
+        {role: "system", content: $system},
+        {role: "user", content: $user}
+      ]
+    }')
+
+  API_RESPONSE=$(curl -s https://models.inference.ai.azure.com/chat/completions \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "$PAYLOAD")
+
+  RESPONSE=$(printf "%s" "$API_RESPONSE" | jq -r '.choices[0].message.content // empty')
+  if [ -z "$RESPONSE" ]; then
+    API_ERROR=$(printf "%s" "$API_RESPONSE" | jq -r '.error.message // empty')
+    if [ -n "$API_ERROR" ]; then
+      echo "❌ APIエラー: $API_ERROR"
+      echo "💡 ヒント: モデル名を変更する場合はスクリプト内の MODEL を調整してください。"
+      exit 1
+    fi
+
+    echo "❌ 解析結果を取得できませんでした。レスポンス形式が想定外です。"
+    echo "🔍 生レスポンス: $API_RESPONSE"
+    exit 1
+  fi
+
+  RESULT+="\n$RESPONSE\n"
+done
+
+FINAL_USER_PROMPT=$(cat <<EOF
+以下は入力ログの解析メモです。重複を統合し、1つの直感的な最終レポートに整形してください。内部処理（分割・チャンクなど）の説明は不要です。
+Yocto固有の語彙（例: do_compile, oe_runmake, Task, recipe, exit code）は可能な限り残し、一般化しすぎないでください。
+
+出力形式:
+🚨 主要エラー
+🧩 原因
+🛠 修正案（優先度順）
+✅ 再発防止策
+🔎 ログ根拠（最大10行、ERROR優先）
+📍 ファイル/行番号一覧
+
+以下の「元ログ重要行」は最大10行です。必ずすべて確認し、ERRORを優先して根拠に使ってください。
+
+[元ログ重要行]
+$EVIDENCE
+
+[ファイル/行番号一覧]
+$LINE_INDEX
+
+[解析メモ]
+
+$RESULT
+EOF
+)
+
+FINAL_PAYLOAD=$(jq -n \
+  --arg model "$MODEL" \
+  --arg system "あなたはビルドエラー解析の専門家です。内部処理には言及せず、入力されたエラーログ全体の最終レポートだけを日本語で提示してください。" \
+  --arg user "$FINAL_USER_PROMPT" \
+  '{
+    model: $model,
+    messages: [
+      {role: "system", content: $system},
+      {role: "user", content: $user}
+    ]
+  }')
+
+FINAL_RESPONSE=$(curl -s https://models.inference.ai.azure.com/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "$FINAL_PAYLOAD")
+
+REPORT=$(printf "%s" "$FINAL_RESPONSE" | jq -r '.choices[0].message.content // empty')
+if [ -z "$REPORT" ]; then
+  API_ERROR=$(printf "%s" "$FINAL_RESPONSE" | jq -r '.error.message // empty')
+  if [ -n "$API_ERROR" ]; then
+    echo "❌ APIエラー: $API_ERROR"
+    echo "💡 ヒント: モデル名を変更する場合はスクリプト内の MODEL を調整してください。"
+    exit 1
+  fi
+
+  echo "❌ 最終レポートを生成できませんでした。レスポンス形式が想定外です。"
+  echo "🔍 生レスポンス: $FINAL_RESPONSE"
+  exit 1
+fi
+
+echo ""
+echo "================================"
+echo "📝 エラーログ解析レポート"
+echo "================================"
+echo -e "$REPORT"
+

@@ -1,0 +1,27 @@
+const yoctoBuildErrorLog = `[2026-04-22 10:14:03] NOTE: Started bitbake build
+[2026-04-22 10:14:05] NOTE: Resolving any missing task queue dependencies
+[2026-04-22 10:14:06] NOTE: Running task 4123 of 8950 (/work/poky/meta-myapp/recipes-myapp/myapp/myapp_1.0.bb:do_compile)
+[2026-04-22 10:14:08] WARNING: myapp-1.0-r0 do_compile: QA Issue: compile-host-path: The compile log indicates usage of host include path
+[2026-04-22 10:14:09] | DEBUG: Executing shell function do_compile
+[2026-04-22 10:14:09] | NOTE: make -j 8
+[2026-04-22 10:14:10] | cc -O2 -pipe -g -feliminate-unused-debug-types -I/work/tmp/work/cortexa72-poky-linux/myapp/1.0-r0/recipe-sysroot/usr/include -c src/main.c -o src/main.o
+[2026-04-22 10:14:10] | src/main.c: In function 'main':
+[2026-04-22 10:14:10] | src/main.c:42:13: error: 'result' undeclared (first use in this function)
+[2026-04-22 10:14:10] |    42 |     if (result < 0) {
+[2026-04-22 10:14:10] |       |             ^~~~~~
+[2026-04-22 10:14:10] | src/main.c:42:13: note: each undeclared identifier is reported only once for each function it appears in
+[2026-04-22 10:14:10] | src/main.c:57:5: warning: implicit declaration of function 'cleanup_resources' [-Wimplicit-function-declaration]
+[2026-04-22 10:14:10] |    57 |     cleanup_resources();
+[2026-04-22 10:14:10] |       |     ^~~~~~~~~~~~~~~~~
+[2026-04-22 10:14:10] | make: *** [Makefile:24: src/main.o] Error 1
+[2026-04-22 10:14:10] | ERROR: oe_runmake failed
+[2026-04-22 10:14:10] | WARNING: exit code 1 from a shell command.
+[2026-04-22 10:14:11] ERROR: Task (/work/poky/meta-myapp/recipes-myapp/myapp/myapp_1.0.bb:do_compile) failed with exit code '1'
+[2026-04-22 10:14:11] NOTE: Tasks Summary: Attempted 4123 tasks of which 4122 didn't need to be rerun and 1 failed.
+[2026-04-22 10:14:11] Summary: 1 task failed:
+[2026-04-22 10:14:11]   /work/poky/meta-myapp/recipes-myapp/myapp/myapp_1.0.bb:do_compile
+[2026-04-22 10:14:11] Summary: There were 2 WARNING messages.
+[2026-04-22 10:14:11] Summary: There was 1 ERROR message, returning a non-zero exit code.`;
+
+console.log(yoctoBuildErrorLog);
+
